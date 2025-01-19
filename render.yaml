@@ -1,5 +1,5 @@
 services:
-  - type: worker
+  - type: web
     name: telegram-solana-bot
     env: node
     buildCommand: npm install
@@ -8,4 +8,4 @@ services:
       - key: BOT_TOKEN
         sync: false
       - key: CHANNEL_ID
-        sync: false 
+        sync: false

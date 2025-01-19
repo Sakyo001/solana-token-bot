@@ -1,6 +1,19 @@
 const { Telegraf, Markup } = require('telegraf');
 const axios = require('axios');
 require('dotenv').config();
+const express = require('express');
+const app = express();
+const port = process.env.PORT || 3000;
+
+// Add basic web server
+app.get('/', (req, res) => {
+    res.send('Bot is running!');
+});
+
+// Start the server
+app.listen(port, () => {
+    console.log(`Server is running on port ${port}`);
+});
 
 // Initialize bot and channel ID
 const bot = new Telegraf(process.env.BOT_TOKEN);
