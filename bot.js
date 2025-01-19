@@ -735,37 +735,64 @@ bot.command('check', async (ctx) => {
     }
 });
 
-// Add token addresses for monitoring
+// Add token addresses for monitoring with pair addresses
 const MONITORED_TOKENS = {
-    'TRUMP': '6p6xgHyF7AeE6TZkSmFsko444wqoP15icUSqi2jfGiPN',  // Updated TRUMP address
-    'VODKA': '5iTrKEyVWiQNoUFfwNZeFCYEwPDgrXCzke9Nz1Dk6g9K',  // VODKA address
-    'AI': '99ouK5YUK3JPGCPX9joNtHsMU7NPpU7w91JN4kdQ97po'      // Updated AI address
+    'TRUMP': {
+        address: '6p6xgHyF7AeE6TZkSmFsko444wqoP15icUSqi2jfGiPN',
+        pairAddress: 'hkujrp5tyqlbeudjkwjgnhs2957qkjr2iwhjkttma1xs'
+    },
+    'VODKA': {
+        address: '5iTrKEyVWiQNoUFfwNZeFCYEwPDgrXCzke9Nz1Dk6g9K',
+        pairAddress: '5un4gxop85lvucccx1pfuqrmxl7xasvqeflvayygmj57'
+    },
+    'AI': {
+        address: '99ouK5YUK3JPGCPX9joNtHsMU7NPpU7w91JN4kdQ97po',
+        pairAddress: 'xdeemwjk6wrojcjkgvxapwgaz3jbbmcsaw1nvt6xsek'
+    }
 };
 
-// Function to fetch and send token alerts
+// Function to fetch token data with better headers
+async function fetchTokenData(address) {
+    const headers = {
+        'Accept': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Origin': 'https://dexscreener.com',
+        'Referer': 'https://dexscreener.com/',
+        'sec-fetch-site': 'same-origin',
+        'sec-fetch-mode': 'cors',
+        'sec-fetch-dest': 'empty'
+    };
+
+    try {
+        const response = await axios.get(
+            `https://api.dexscreener.com/latest/dex/tokens/solana/${address}`,
+            {
+                headers,
+                timeout: 10000
+            }
+        );
+        return response.data;
+    } catch (error) {
+        console.error(`Error fetching token data: ${error.message}`);
+        return null;
+    }
+}
+
+// Function to fetch and send token alerts with better error handling
 async function sendTokenAlerts() {
     try {
-        for (const [tokenName, address] of Object.entries(MONITORED_TOKENS)) {
+        for (const [tokenName, tokenInfo] of Object.entries(MONITORED_TOKENS)) {
             try {
-                // Try to get token data using search first
-                const searchResponse = await axios.get('https://api.dexscreener.com/latest/dex/search', {
-                    params: { q: address },
-                    headers: {
-                        'Accept': 'application/json',
-                        'User-Agent': 'Mozilla/5.0'
-                    }
-                });
-
-                const solanaPairs = searchResponse.data?.pairs?.filter(p => 
-                    p.chainId === 'solana' && 
-                    p.baseToken.address === address
-                );
-
-                if (solanaPairs?.[0]) {
-                    const pair = solanaPairs[0];
+                console.log(`Fetching data for ${tokenName}...`);
+                
+                const data = await fetchTokenData(tokenInfo.address);
+                
+                if (data?.pairs?.[0]) {
+                    const pair = data.pairs[0];
                     
                     const alertMessage = 
-                        `🔔 *${tokenName} Token 4-Hour Update*\n\n` +
+                        `🔔 *${tokenName} Token Update*\n\n` +
                         `💰 Price: $${Number(pair.priceUsd).toFixed(8)}\n` +
                         `📊 24h Change: ${pair.priceChange?.h24 || '0'}%\n` +
                         `💎 FDV: $${Number(pair.fdv || 0).toLocaleString()}\n` +
@@ -775,8 +802,8 @@ async function sendTokenAlerts() {
                         `🏦 DEX: ${pair.dexId}\n\n` +
                         `Links:\n` +
                         `• [DexScreener](https://dexscreener.com/solana/${pair.pairAddress})\n` +
-                        `• [Raydium](https://raydium.io/swap/?inputCurrency=sol&outputCurrency=${address})\n` +
-                        `• [Birdeye](https://birdeye.so/token/${address})\n\n` +
+                        `• [Raydium](https://raydium.io/swap/?inputCurrency=sol&outputCurrency=${tokenInfo.address})\n` +
+                        `• [Birdeye](https://birdeye.so/token/${tokenInfo.address})\n\n` +
                         `⚠️ DYOR! Check token safety before trading!`;
 
                     await bot.telegram.sendMessage(CHANNEL_ID, alertMessage, {
@@ -784,14 +811,16 @@ async function sendTokenAlerts() {
                         disable_web_page_preview: true
                     });
 
-                    // Add delay between tokens
-                    await delay(2000);
+                    // Add longer delay between tokens
+                    await delay(5000);
                 } else {
-                    console.error(`No data found for ${tokenName} (${address})`);
+                    console.error(`No valid pair data found for ${tokenName}`);
                 }
             } catch (error) {
-                console.error(`Error fetching ${tokenName} data:`, error.message);
+                console.error(`Error processing ${tokenName}:`, error.message);
             }
+            // Add delay between tokens even if there's an error
+            await delay(5000);
         }
     } catch (error) {
         console.error('Error in sendTokenAlerts:', error);
