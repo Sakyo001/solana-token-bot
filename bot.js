@@ -5,14 +5,21 @@ const express = require('express');
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Add basic web server
+// Add basic web server with error handling
 app.get('/', (req, res) => {
     res.send('Bot is running!');
 });
 
-// Start the server
-app.listen(port, () => {
+// Start the server with error handling
+const server = app.listen(port, () => {
     console.log(`Server is running on port ${port}`);
+}).on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+        console.log(`Port ${port} is busy, trying ${port + 1}`);
+        server.listen(port + 1);
+    } else {
+        console.error('Server error:', err);
+    }
 });
 
 // Initialize bot and channel ID
@@ -735,75 +742,57 @@ bot.command('check', async (ctx) => {
     }
 });
 
-// Add token addresses for monitoring with pair addresses
+// Add token addresses for monitoring
 const MONITORED_TOKENS = {
     'TRUMP': {
-        address: '6p6xgHyF7AeE6TZkSmFsko444wqoP15icUSqi2jfGiPN',
-        pairAddress: 'hkujrp5tyqlbeudjkwjgnhs2957qkjr2iwhjkttma1xs'
+        address: '6p6xgHyF7AeE6TZkSmFsko444wqoP15icUSqi2jfGiPN'
     },
     'VODKA': {
-        address: '5iTrKEyVWiQNoUFfwNZeFCYEwPDgrXCzke9Nz1Dk6g9K',
-        pairAddress: '5un4gxop85lvucccx1pfuqrmxl7xasvqeflvayygmj57'
+        address: '5iTrKEyVWiQNoUFfwNZeFCYEwPDgrXCzke9Nz1Dk6g9K'
     },
     'AI': {
-        address: '99ouK5YUK3JPGCPX9joNtHsMU7NPpU7w91JN4kdQ97po',
-        pairAddress: 'xdeemwjk6wrojcjkgvxapwgaz3jbbmcsaw1nvt6xsek'
+        address: '99ouK5YUK3JPGCPX9joNtHsMU7NPpU7w91JN4kdQ97po'
     }
 };
 
-// Function to fetch token data with better headers
-async function fetchTokenData(address) {
-    const headers = {
-        'Accept': 'application/json',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Origin': 'https://dexscreener.com',
-        'Referer': 'https://dexscreener.com/',
-        'sec-fetch-site': 'same-origin',
-        'sec-fetch-mode': 'cors',
-        'sec-fetch-dest': 'empty'
-    };
-
+// Function to fetch token price using Jupiter API
+async function fetchTokenPrice(address) {
     try {
         const response = await axios.get(
-            `https://api.dexscreener.com/latest/dex/tokens/solana/${address}`,
+            `https://price.jup.ag/v4/price?ids=${address}`,
             {
-                headers,
-                timeout: 10000
+                headers: {
+                    'Accept': 'application/json',
+                    'User-Agent': 'Mozilla/5.0'
+                }
             }
         );
         return response.data;
     } catch (error) {
-        console.error(`Error fetching token data: ${error.message}`);
+        console.error(`Error fetching price data: ${error.message}`);
         return null;
     }
 }
 
-// Function to fetch and send token alerts with better error handling
+// Function to send token alerts
 async function sendTokenAlerts() {
     try {
         for (const [tokenName, tokenInfo] of Object.entries(MONITORED_TOKENS)) {
             try {
                 console.log(`Fetching data for ${tokenName}...`);
                 
-                const data = await fetchTokenData(tokenInfo.address);
+                const priceData = await fetchTokenPrice(tokenInfo.address);
                 
-                if (data?.pairs?.[0]) {
-                    const pair = data.pairs[0];
+                if (priceData?.data?.[tokenInfo.address]) {
+                    const tokenPrice = priceData.data[tokenInfo.address];
                     
                     const alertMessage = 
                         `🔔 *${tokenName} Token Update*\n\n` +
-                        `💰 Price: $${Number(pair.priceUsd).toFixed(8)}\n` +
-                        `📊 24h Change: ${pair.priceChange?.h24 || '0'}%\n` +
-                        `💎 FDV: $${Number(pair.fdv || 0).toLocaleString()}\n` +
-                        `💧 Liquidity: $${Number(pair.liquidity?.usd || 0).toLocaleString()}\n` +
-                        `📈 24h Volume: $${Number(pair.volume?.h24 || 0).toLocaleString()}\n` +
-                        `🔄 24h Txns: ${pair.txns?.h24 || '0'}\n` +
-                        `🏦 DEX: ${pair.dexId}\n\n` +
+                        `💰 Price: $${Number(tokenPrice.price).toFixed(8)}\n` +
+                        `📊 Value: ${tokenPrice.value}\n` +
                         `Links:\n` +
-                        `• [DexScreener](https://dexscreener.com/solana/${pair.pairAddress})\n` +
-                        `• [Raydium](https://raydium.io/swap/?inputCurrency=sol&outputCurrency=${tokenInfo.address})\n` +
-                        `• [Birdeye](https://birdeye.so/token/${tokenInfo.address})\n\n` +
+                        `• [Jupiter](https://jup.ag/swap/SOL-${tokenInfo.address})\n` +
+                        `• [Raydium](https://raydium.io/swap/?inputCurrency=sol&outputCurrency=${tokenInfo.address})\n\n` +
                         `⚠️ DYOR! Check token safety before trading!`;
 
                     await bot.telegram.sendMessage(CHANNEL_ID, alertMessage, {
@@ -811,26 +800,36 @@ async function sendTokenAlerts() {
                         disable_web_page_preview: true
                     });
 
-                    // Add longer delay between tokens
+                    console.log(`Successfully sent update for ${tokenName}`);
                     await delay(5000);
                 } else {
-                    console.error(`No valid pair data found for ${tokenName}`);
+                    console.error(`No valid price data found for ${tokenName}`);
+                    await bot.telegram.sendMessage(CHANNEL_ID, 
+                        `⚠️ Unable to fetch price for ${tokenName}. Will try again later.`, 
+                        { parse_mode: 'Markdown' }
+                    );
                 }
             } catch (error) {
                 console.error(`Error processing ${tokenName}:`, error.message);
+                await bot.telegram.sendMessage(CHANNEL_ID, 
+                    `❌ Error updating ${tokenName}: ${error.message}`, 
+                    { parse_mode: 'Markdown' }
+                );
             }
-            // Add delay between tokens even if there's an error
             await delay(5000);
         }
     } catch (error) {
         console.error('Error in sendTokenAlerts:', error);
+        await bot.telegram.sendMessage(CHANNEL_ID, 
+            '❌ Error in token update system. Will retry soon.', 
+            { parse_mode: 'Markdown' }
+        );
     }
 }
 
-// Function to send initial welcome and token status
+// Add startup notification
 async function sendStartupNotification() {
     try {
-        // Send startup message
         await bot.telegram.sendMessage(
             CHANNEL_ID,
             `🚀 *Bot Started Successfully!*\n\n` +
@@ -844,10 +843,9 @@ async function sendStartupNotification() {
                 disable_web_page_preview: true
             }
         );
-
-        // Immediately send first token updates
+        
+        // Send initial token updates
         await sendTokenAlerts();
-
     } catch (error) {
         console.error('Error in startup notification:', error);
     }
