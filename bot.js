@@ -202,10 +202,85 @@ async function getDexScreenerData(searchTerm) {
     }
 }
 
-// Update search function to combine CoinGecko and DexScreener results
+// Update search function with rate limiting and better error handling
+async function searchCoingeckoTokens(searchTerm) {
+    try {
+        const searchResponse = await axios.get(`https://api.coingecko.com/api/v3/search`, {
+            params: { query: searchTerm },
+            headers: {
+                'Accept': 'application/json',
+                'User-Agent': 'Mozilla/5.0'
+            }
+        });
+
+        if (!searchResponse.data?.coins) {
+            return [];
+        }
+
+        const detailedTokens = [];
+        // Only process first 3 results to avoid rate limits
+        for (const coin of searchResponse.data.coins.slice(0, 3)) {
+            try {
+                // Add exponential backoff retry logic
+                let retryCount = 0;
+                const maxRetries = 3;
+                let delay = 1000; // Start with 1 second delay
+
+                while (retryCount < maxRetries) {
+                    try {
+                        const response = await axios.get(`https://api.coingecko.com/api/v3/coins/${coin.id}`, {
+                            params: {
+                                localization: false,
+                                tickers: true,
+                                market_data: true,
+                                community_data: false,
+                                developer_data: false
+                            },
+                            headers: {
+                                'Accept': 'application/json',
+                                'User-Agent': 'Mozilla/5.0'
+                            }
+                        });
+                        
+                        if (response.data) {
+                            detailedTokens.push(response.data);
+                        }
+                        // Successful request, break the retry loop
+                        break;
+                    } catch (error) {
+                        if (error.response?.status === 429) {
+                            retryCount++;
+                            if (retryCount === maxRetries) {
+                                console.error(`Max retries reached for ${coin.id}`);
+                                break;
+                            }
+                            console.log(`Rate limited, waiting ${delay/1000} seconds before retry ${retryCount}`);
+                            await new Promise(resolve => setTimeout(resolve, delay));
+                            delay *= 2; // Exponential backoff
+                        } else {
+                            // If it's not a rate limit error, throw it
+                            throw error;
+                        }
+                    }
+                }
+                // Add a consistent delay between successful requests
+                await new Promise(resolve => setTimeout(resolve, 2000));
+            } catch (error) {
+                console.error(`Error fetching details for ${coin.id}:`, error.message);
+            }
+        }
+
+        return detailedTokens;
+    } catch (error) {
+        console.error('Error searching CoinGecko:', error);
+        return [];
+    }
+}
+
+// Update the combined search function
 async function searchSolanaTokens(searchTerm) {
     try {
-        // Fetch from both sources in parallel
+        // Add delay between API calls
         const [coingeckoTokens, dexscreenerPairs] = await Promise.all([
             searchCoingeckoTokens(searchTerm),
             getDexScreenerData(searchTerm)
@@ -239,57 +314,10 @@ async function searchSolanaTokens(searchTerm) {
             )
         );
 
-        return uniqueTokens;
+        // Limit the number of results to prevent timeout
+        return uniqueTokens.slice(0, 5);
     } catch (error) {
         console.error('Error in combined search:', error);
-        return [];
-    }
-}
-
-// Add helper function for CoinGecko search
-async function searchCoingeckoTokens(searchTerm) {
-    try {
-        const searchResponse = await axios.get(`https://api.coingecko.com/api/v3/search`, {
-            params: { query: searchTerm },
-            headers: {
-                'Accept': 'application/json',
-                'User-Agent': 'Mozilla/5.0'
-            }
-        });
-
-        if (!searchResponse.data?.coins) {
-            return [];
-        }
-
-        const detailedTokens = [];
-        for (const coin of searchResponse.data.coins.slice(0, 5)) {
-            try {
-                const response = await axios.get(`https://api.coingecko.com/api/v3/coins/${coin.id}`, {
-                    params: {
-                        localization: false,
-                        tickers: true,
-                        market_data: true,
-                        community_data: false,
-                        developer_data: false
-                    },
-                    headers: {
-                        'Accept': 'application/json',
-                        'User-Agent': 'Mozilla/5.0'
-                    }
-                });
-                
-                if (response.data) {
-                    detailedTokens.push(response.data);
-                }
-                await delay(1000);
-            } catch (error) {
-                console.error(`Error fetching details for ${coin.id}:`, error.message);
-            }
-        }
-
-        return detailedTokens;
-    } catch (error) {
-        console.error('Error searching CoinGecko:', error);
         return [];
     }
 }
@@ -1375,56 +1403,53 @@ bot.command('search', async (ctx) => {
 
         await ctx.reply(`Found ${tokens.length} tokens. Displaying results...`);
 
+        // Add delay between messages
         for (const token of tokens) {
-            const isDexScreenerToken = !!token.dexscreener_data;
-            
-            const message = `
+            try {
+                const message = formatTokenMessage(token);
+                await ctx.replyWithMarkdown(message, { 
+                    disable_web_page_preview: true 
+                });
+                await delay(2000); // 2 second delay between messages
+            } catch (error) {
+                console.error('Error displaying token:', error);
+                continue;
+            }
+        }
+
+        await statusMsg.edit(`✅ Search complete! Displayed ${tokens.length} results.`);
+
+    } catch (error) {
+        console.error('Error in search command:', error);
+        await ctx.reply('❌ Error searching tokens. Please try again later.');
+    }
+});
+
+// Add helper function to format token messages
+function formatTokenMessage(token) {
+    return `
 *${token.name} (${token.symbol.toUpperCase()})*
 
 💰 *Price Information:*
 • Current Price: $${token.market_data?.current_price?.usd?.toFixed(8) || 'Unknown'}
 • 24h Change: ${token.market_data?.price_change_percentage_24h?.toFixed(2) || 0}%
-${isDexScreenerToken ? `• Liquidity: $${Number(token.dexscreener_data?.liquidity).toLocaleString() || 'Unknown'}
-• DEX: ${token.dexscreener_data?.dex || 'Unknown'}` : `• 7d Change: ${token.market_data?.price_change_percentage_7d?.toFixed(2) || 0}%`}
 
 📊 *Market Data:*
 • Market Cap: $${token.market_data?.market_cap?.usd ? Number(token.market_data.market_cap.usd).toLocaleString() : 'Unknown'}
 • FDV: $${token.market_data?.fully_diluted_valuation?.usd ? Number(token.market_data.fully_diluted_valuation.usd).toLocaleString() : 'Unknown'}
 • 24h Volume: $${token.market_data?.total_volume?.usd ? Number(token.market_data.total_volume.usd).toLocaleString() : 'Unknown'}
 
-${isDexScreenerToken ? `⏰ *Launch Information:*
+${token.dexscreener_data ? `⏰ *Launch Information:*
 • Created: ${new Date(token.dexscreener_data.created_at).toLocaleString()}
-• Pair Address: ${token.dexscreener_data.pairs}` : ''}
+• DEX: ${token.dexscreener_data.dex}
+• Liquidity: $${Number(token.dexscreener_data.liquidity).toLocaleString()}` : ''}
 
-🔍 *Verification Links:*
+🔗 *Links:*
 • [Solscan](https://solscan.io/token/${token.contract_address || ''})
 • [Birdeye](https://birdeye.so/token/${token.contract_address || ''})
 • [DexScreener](https://dexscreener.com/solana/${token.contract_address || ''})
 • [RugCheck](https://rugcheck.xyz/tokens/${token.contract_address || ''})
 
-⚠️ *Risk Warning:*
-• Always DYOR before investing
-• Check contract verification
-• Verify liquidity & holders
-• Monitor trading patterns
-• Start with small amounts
-• Be aware of potential risks
+⚠️ *DYOR! Always verify before investing!*
 `;
-
-            await ctx.replyWithMarkdown(message, { 
-                disable_web_page_preview: true 
-            });
-            await delay(1000);
-        }
-
-        await ctx.reply(
-            "✅ Search complete!\n\n" +
-            "💡 Tips:\n" +
-            "• Always verify tokens before trading"
-        );
-
-    } catch (error) {
-        console.error('Error in search command:', error);
-        await ctx.reply('❌ Error searching tokens. Please try again.');
-    }
-});
+}
