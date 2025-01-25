@@ -180,36 +180,128 @@ async function getSolanaTokens() {
     }
 }
 
-// Add function to fetch DexScreener data
+// Update function to fetch DexScreener data with better headers and fallback
 async function getDexScreenerData(searchTerm) {
+    const endpoints = [
+        'https://api.dexscreener.com/latest/dex/search',
+        'https://api.dexscreener.com/latest/dex/tokens',
+        'https://api.dexscreener.com/latest/dex/pairs'
+    ];
+
+    const headers = {
+        'Accept': 'application/json',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Origin': 'https://dexscreener.com',
+        'Referer': 'https://dexscreener.com/',
+        'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Windows"',
+        'sec-fetch-dest': 'empty',
+        'sec-fetch-mode': 'cors',
+        'sec-fetch-site': 'same-site'
+    };
+
+    for (const endpoint of endpoints) {
+        try {
+            const response = await axios.get(`${endpoint}`, {
+                params: { q: searchTerm },
+                headers: headers,
+                timeout: 10000,
+                validateStatus: function (status) {
+                    return status >= 200 && status < 300;
+                }
+            });
+
+            if (response.data?.pairs) {
+                // Filter for Solana pairs only
+                const solanaPairs = response.data.pairs.filter(pair => 
+                    pair.chainId === 'solana' && 
+                    pair.baseToken?.address
+                );
+                
+                console.log(`Found ${solanaPairs.length} Solana pairs from DexScreener`);
+                return solanaPairs;
+            }
+        } catch (error) {
+            console.error(`DexScreener ${endpoint} error:`, error.message);
+            // Try next endpoint
+            continue;
+        }
+    }
+
+    // Fallback to Birdeye API if DexScreener fails
     try {
-        const response = await axios.get(`https://api.dexscreener.com/latest/dex/search/?q=${searchTerm}`, {
+        const birdeyeResponse = await axios.get(`https://public-api.birdeye.so/public/token_list`, {
+            params: { offset: 0, limit: 100 },
             headers: {
-                'Accept': 'application/json',
-                'User-Agent': 'Mozilla/5.0'
-            },
-            timeout: 10000
+                'X-API-KEY': 'BIRDEYE_PUBLIC',
+                'Accept': 'application/json'
+            }
         });
 
-        if (response.data?.pairs) {
-            // Filter for Solana pairs only
-            return response.data.pairs.filter(pair => pair.chainId === 'solana');
+        if (birdeyeResponse.data?.data) {
+            const tokens = birdeyeResponse.data.data.filter(token => 
+                token.symbol.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                token.name.toLowerCase().includes(searchTerm.toLowerCase())
+            );
+
+            // Convert Birdeye format to DexScreener format
+            return tokens.map(token => ({
+                chainId: 'solana',
+                dexId: 'birdeye',
+                pairAddress: token.address,
+                baseToken: {
+                    address: token.address,
+                    name: token.name,
+                    symbol: token.symbol
+                },
+                priceUsd: token.price,
+                priceChange: { h24: token.priceChange24h },
+                volume: { h24: token.volume24h },
+                liquidity: { usd: token.liquidity },
+                fdv: token.fdv
+            }));
         }
-        return [];
     } catch (error) {
-        console.error('DexScreener fetch error:', error);
-        return [];
+        console.error('Birdeye API error:', error.message);
     }
+
+    return [];
 }
 
-// Update search function with rate limiting and better error handling
+// Update rate limiting for CoinGecko
+const COINGECKO_RATE_LIMIT = {
+    maxRequests: 10,
+    timeWindow: 60000, // 1 minute
+    requests: [],
+};
+
+// Add rate limiting function
+async function checkRateLimit() {
+    const now = Date.now();
+    COINGECKO_RATE_LIMIT.requests = COINGECKO_RATE_LIMIT.requests.filter(
+        time => now - time < COINGECKO_RATE_LIMIT.timeWindow
+    );
+    
+    if (COINGECKO_RATE_LIMIT.requests.length >= COINGECKO_RATE_LIMIT.maxRequests) {
+        const oldestRequest = COINGECKO_RATE_LIMIT.requests[0];
+        const waitTime = COINGECKO_RATE_LIMIT.timeWindow - (now - oldestRequest);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+    }
+    
+    COINGECKO_RATE_LIMIT.requests.push(now);
+}
+
+// Update searchCoingeckoTokens with improved rate limiting
 async function searchCoingeckoTokens(searchTerm) {
     try {
+        await checkRateLimit();
         const searchResponse = await axios.get(`https://api.coingecko.com/api/v3/search`, {
             params: { query: searchTerm },
             headers: {
                 'Accept': 'application/json',
-                'User-Agent': 'Mozilla/5.0'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
         });
 
@@ -218,55 +310,32 @@ async function searchCoingeckoTokens(searchTerm) {
         }
 
         const detailedTokens = [];
-        // Only process first 3 results to avoid rate limits
         for (const coin of searchResponse.data.coins.slice(0, 3)) {
             try {
-                // Add exponential backoff retry logic
-                let retryCount = 0;
-                const maxRetries = 3;
-                let delay = 1000; // Start with 1 second delay
-
-                while (retryCount < maxRetries) {
-                    try {
-                        const response = await axios.get(`https://api.coingecko.com/api/v3/coins/${coin.id}`, {
-                            params: {
-                                localization: false,
-                                tickers: true,
-                                market_data: true,
-                                community_data: false,
-                                developer_data: false
-                            },
-                            headers: {
-                                'Accept': 'application/json',
-                                'User-Agent': 'Mozilla/5.0'
-                            }
-                        });
-                        
-                        if (response.data) {
-                            detailedTokens.push(response.data);
-                        }
-                        // Successful request, break the retry loop
-                        break;
-                    } catch (error) {
-                        if (error.response?.status === 429) {
-                            retryCount++;
-                            if (retryCount === maxRetries) {
-                                console.error(`Max retries reached for ${coin.id}`);
-                                break;
-                            }
-                            console.log(`Rate limited, waiting ${delay/1000} seconds before retry ${retryCount}`);
-                            await new Promise(resolve => setTimeout(resolve, delay));
-                            delay *= 2; // Exponential backoff
-                        } else {
-                            // If it's not a rate limit error, throw it
-                            throw error;
-                        }
+                await checkRateLimit();
+                const response = await axios.get(`https://api.coingecko.com/api/v3/coins/${coin.id}`, {
+                    params: {
+                        localization: false,
+                        tickers: true,
+                        market_data: true,
+                        community_data: false,
+                        developer_data: false
+                    },
+                    headers: {
+                        'Accept': 'application/json',
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
                     }
+                });
+                
+                if (response.data) {
+                    detailedTokens.push(response.data);
                 }
-                // Add a consistent delay between successful requests
-                await new Promise(resolve => setTimeout(resolve, 2000));
+                
+                // Add delay between requests
+                await delay(2000);
             } catch (error) {
                 console.error(`Error fetching details for ${coin.id}:`, error.message);
+                continue;
             }
         }
 
